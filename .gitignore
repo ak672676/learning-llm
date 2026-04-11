@@ -1,5 +1,43 @@
+# Virtual environment
 venv/
+
+# Python
 __pycache__/
-.ipynb_checkpoints/
 *.pyc
+*.pyo
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# ML artifacts
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.gguf
+wandb/
+runs/
+checkpoints/
+
+# Data (large files)
+*.csv
+*.tsv
+*.parquet
+data/
+
+# Secrets
+.env
+*.key
+
+# Claude
+.claude/
+CLAUDE.md
