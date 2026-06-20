@@ -1,234 +1,275 @@
-# Day 13: RNN — Models That Read Sequences
+# Day 13: RNN — In Simple Words
 
-## Why This Matters
+## The Mental Model
 
-Every model you've built so far had a critical flaw: **it doesn't care about word order**.
+Imagine you're reading a book. You can't hold the WHOLE book in your head — but you can carry a small **notebook** that you update after every word.
 
 ```
-"not amazing"     → averaged embeddings → looks like "amazing not"
-"the cat sat"     → same BoW vector as → "sat the cat"
+Before reading anything:  notebook is blank
+After reading word 1:     notebook has some notes about word 1
+After reading word 2:     notebook has notes about words 1 AND 2 (mixed together)
+After reading word 3:     notebook has notes about words 1, 2, AND 3
+...and so on
 ```
 
-For real text understanding — translation, sentiment, generation — order matters everywhere. Today we learn the **first** sequence model: the **Recurrent Neural Network (RNN)**.
+That's an RNN. The "notebook" is called the **hidden state**. It's just a small vector of numbers (say, 64 numbers).
 
-This isn't the final answer (transformers eventually replace RNNs), but RNNs introduce concepts that carry forward:
-- **Hidden state** — memory that flows through the sequence
-- **Step-by-step processing** — one token at a time
-- **Variable-length inputs** — sentences can be any length
+The cool thing: the SAME notebook size, no matter how long the book. RNNs can read sentences of any length.
 
 ---
 
-## 1. The Core Idea
+## Why We Need This
 
-An RNN processes a sequence **one token at a time**, carrying a "memory" forward:
+Before today (Day 10-12), all our models had a fatal flaw: they ignored word ORDER.
 
 ```
-Input:   "the"    "cat"    "sat"
-            ↓        ↓        ↓
-Hidden:   h0  →   h1   →   h2   →   h3  (the "memory")
-            ↑        ↑        ↑
-         "fresh"  "knows  "knows
-          start"  about    about
-                  the"     the cat"
+"not bad"  ←→  "bad not"     ← these meant the SAME thing to our old models!
 ```
 
-At each step:
-1. Take the current word + the previous hidden state
-2. Combine them → new hidden state
-3. Pass the new hidden state forward
-
-The **final hidden state** contains a summary of the whole sequence.
+An RNN reads left to right and carries context, so it can finally tell these apart.
 
 ---
 
-## 2. The RNN Equation
+## The RNN Formula — Plain English
 
-For each step `t`:
+The "scary" math is:
 
 ```
-h_t = tanh(W_xh @ x_t + W_hh @ h_{t-1} + b)
+new_notebook = tanh(weights × [word + old_notebook] + bias)
 ```
 
-Where:
-- `x_t` = the input word at time t (an embedding vector)
-- `h_{t-1}` = the previous hidden state (the memory so far)
-- `W_xh` = weights that transform the input
-- `W_hh` = weights that transform the previous memory
-- `b` = bias
-- `tanh` = activation (keeps values bounded -1 to 1)
+But really, it's just three steps:
 
-The output at each step is just `h_t`. To predict something at the end, you take the FINAL hidden state and feed it to a classifier.
+```
+STEP 1: Glue together (concatenate)
+        new_input = [word ; old_notebook]
 
-### What gets learned?
+STEP 2: Multiply by a weight matrix + add bias
+        z = W × new_input + b
 
-PyTorch updates `W_xh`, `W_hh`, and `b` through backprop. Over training:
-- `W_xh` learns to extract useful info from each word
-- `W_hh` learns how to "remember" or "forget" past info
-- The hidden state learns to summarize the sequence
+STEP 3: Squish through tanh
+        new_notebook = tanh(z)        ← keeps values between -1 and +1
+```
+
+That's literally it. Three operations. Done.
+
+The SAME `W` and `b` are used at every time step. That's why we can handle any sequence length — we only learn ONE set of weights.
 
 ---
 
-## 3. Why "Recurrent"?
+## What Each Piece of Code Does
 
-The same weights are used at EVERY time step. It's the same operation, looped over the sequence:
+### `self.embedding = nn.Embedding(vocab_size, embed_dim)`
+
+A **lookup table** that turns each character ID into a small vector.
+
+Think: a dictionary where:
+- "a" → `[0.5, -0.2, 0.8, ...]`
+- "b" → `[-0.1, 0.7, 0.3, ...]`
+- "c" → `[0.0, 0.4, -0.6, ...]`
+
+These vectors are LEARNED — the model figures out which letters should have similar vectors based on how they're used.
+
+### `self.rnn = nn.RNN(embed_dim, hidden_dim, batch_first=True)`
+
+The "notebook updater." It:
+- Takes the current character vector
+- Mixes it with the current notebook
+- Outputs a new notebook
+
+`batch_first=True` is just convention — it makes the input shape `(batch, time, features)` which feels natural.
+
+### `self.fc = nn.Linear(hidden_dim, vocab_size)`
+
+The "decision maker." At each step, it looks at the notebook and votes for what the NEXT character should be. The output is logits — a score for every possible character.
+
+To convert logits → probabilities → an actual choice, we use softmax + sampling.
+
+### `forward(self, x, h=None)`
+
+The function that runs everything. Three lines:
 
 ```python
-h = torch.zeros(hidden_dim)         # start with empty memory
-for word in sentence:
-    h = rnn_step(word, h)            # same function applied repeatedly
-# h now contains the summary of the whole sentence
+embedded = self.embedding(x)        # IDs → vectors
+output, h = self.rnn(embedded, h)   # vectors → updated notebook at each step
+logits   = self.fc(output)           # notebook → next-char scores
 ```
 
-This is the recurrence — the function feeds back into itself.
+That's the whole model. Three layers stacked.
 
 ---
 
-## 4. The Vanishing Gradient Problem
+## The "Shift By 1" Training Trick
 
-RNNs in their basic form have a SERIOUS problem with long sequences.
+For each name, we train the model to PREDICT THE NEXT CHARACTER at every position.
 
-### What happens
-
-When we backpropagate through 100 time steps:
-- The gradient gets multiplied by `W_hh` 100 times
-- If values in W_hh are < 1 → gradients shrink to ~0 (**vanishing**)
-- If values are > 1 → gradients explode to infinity (**exploding**)
-
-Result: **the model can't learn long-range dependencies**.
+Example: name = "amit", wrapped with markers → ".amit."
 
 ```
-"I grew up in France ... [50 words later] ... I speak ___"
+position:     0   1   2   3   4   5
+chars:        .   a   m   i   t   .
+
+INPUT (X):    .   a   m   i   t           (positions 0-4)
+TARGET (Y):   a   m   i   t   .           (positions 1-5)
+```
+
+The model learns:
+- "See '.', predict 'a'"
+- "See '.a', predict 'm'" (using the notebook)
+- "See '.am', predict 'i'"
+- "See '.ami', predict 't'"
+- "See '.amit', predict '.'"  (stop!)
+
+ONE name = FIVE training signals. Efficient!
+
+---
+
+## How Generation Works
+
+After training, we ask the model to invent new names. The loop:
+
+```
+1. Start with '.' (the start marker).
+2. Run it through the model → get probabilities for next character.
+3. Sample a random character based on those probabilities.
+4. Append it to the output.
+5. Feed it back as the next input. The model's notebook carries forward!
+6. Stop when we sample '.' (the end marker).
+```
+
+This is **autoregressive generation**. The exact same loop ChatGPT uses, just at character level instead of token level.
+
+---
+
+## Temperature — The Creativity Knob
+
+When sampling, we divide logits by a "temperature" `T`:
+
+```
+T = 0.1:   Very confident. Almost always picks the most likely letter.
+           → Output: predictable, often gets stuck in loops.
+           
+T = 1.0:   Normal. Sample from the original distribution.
+           → Output: balanced.
+           
+T = 2.0:   Spread out. Less likely letters get picked too.
+           → Output: creative, sometimes nonsense.
+```
+
+The math: `probs = softmax(logits / T)`. Dividing by a small T makes some logits MUCH bigger (after exp), so softmax concentrates on the winner. Dividing by a big T flattens everything.
+
+Try it: the same trained model can generate "anita" (low T) or "xqzfwt" (high T).
+
+---
+
+## Hidden State Heatmap — What You're Seeing
+
+When we plot the hidden state over time:
+
+```
+Columns = each character of the name (in order)
+Rows    = the 64 numbers in the notebook
+Color   = the value
+            red = positive (+1)
+            blue = negative (-1)
+            white = zero
+```
+
+Each column is a snapshot of the notebook AT THAT POINT in reading.
+
+What to look for:
+- **Some rows change a lot, others stay stable.** The stable ones might be tracking "is this a name?" The changing ones track local patterns.
+- **Big shifts when crossing certain letters** = the model noticed something important.
+
+The exact patterns aren't human-readable — the model invents its own concepts. But the heatmap PROVES information is flowing forward.
+
+---
+
+## Vanishing Gradient — The RNN's Achilles Heel
+
+When training, gradients flow BACKWARDS through every step. Each step multiplies the gradient by some number (often less than 1).
+
+Multiply many times → number shrinks to almost zero:
+
+```
+0.7 × 0.7 × 0.7 × ... (50 times) ≈ 0.0000018
+```
+
+By the time the gradient reaches step 1, there's nothing left. The model **can't learn long-range dependencies**.
+
+```
+"I grew up in France ... [70 words later] ... I speak ___"
                                                        ↑
-                          To predict "French" the model needs to remember 
-                          something from 50 steps ago. RNNs lose this signal.
+                Should be "French" — but the RNN's gradient died
+                way before reaching "France" during training.
+                So it never learned the connection.
 ```
 
-### How researchers fixed it
-
-- **LSTM** (1997) — adds "gates" that control what to remember/forget
-- **GRU** (2014) — simpler version of LSTM
-- **Transformer** (2017) — abandons recurrence entirely, uses attention instead
-
-For most modern NLP, transformers won. But understanding RNNs makes you understand WHY transformers are better.
+This is why we move on from RNNs to **transformers** (Day 15+). Transformers don't have this problem because every position can directly look at every other position — no chains of multiplication.
 
 ---
 
-## 5. PyTorch's Built-in RNN
+## LSTM — A Quick Fix (Not Our Final Answer)
 
-You don't have to implement the loop yourself. PyTorch has `nn.RNN`, `nn.LSTM`, `nn.GRU`:
+LSTM is "RNN with extra plumbing" to fight vanishing gradient.
 
-```python
-rnn = nn.RNN(input_size=embed_dim, hidden_size=64, batch_first=True)
+Instead of just overwriting the notebook every step, LSTM has THREE "gates":
 
-# Input shape: (batch, seq_len, embed_dim)
-output, final_hidden = rnn(embedded)
-# output: (batch, seq_len, hidden) — h_t at each step
-# final_hidden: (1, batch, hidden) — just the last h_t
+```
+Forget gate:  "What old info should I erase?"
+Input gate:   "What new info should I save?"
+Output gate:  "What part of memory should I expose to the next layer?"
 ```
 
-For classification, you usually use the **final hidden state** and feed it to a Linear layer.
+Each gate is a tiny neural network outputting 0 (block) to 1 (let through).
+
+Result: LSTMs can keep info for HUNDREDS of steps. Much better than plain RNNs.
+
+But — we still move past them to transformers, because attention is even better.
 
 ---
 
-## 6. Character-Level Generation: a Classic RNN Task
+## When to Use What (Cheat Sheet)
 
-A famous RNN demo: train it on a corpus of names (or Shakespeare, etc.) one character at a time:
-
-```
-Input:  "amit"
-Target: "mit"     ← shifted by 1 (predict next char)
-```
-
-After training, you can generate new names by:
-1. Start with a random character
-2. Feed it through the RNN
-3. Sample the next character from the output distribution
-4. Feed that back in
-5. Repeat
-
-This is how Karpathy's famous "char-rnn" worked — generated Shakespeare-like text from scratch.
+| Task | Best tool |
+|------|-----------|
+| Learning the basics of sequences | Plain RNN (this day) |
+| Time series, simple tasks | LSTM / GRU |
+| Modern NLP, long context | Transformer (Day 15+) |
+| Anything serious today | Transformer |
 
 ---
 
-## 7. The Three Roles of an RNN's Output
+## What Carries Forward to Transformers
 
-An RNN has two outputs per step. Which you use depends on your task:
+You'll use these CONCEPTS again — even though we abandon the RNN architecture:
 
-| Task | Use |
-|------|-----|
-| Classification (sentiment, topic) | **Final hidden state** → one prediction |
-| Sequence labeling (NER, POS) | **All outputs** → prediction at each step |
-| Sequence generation (text gen) | **All outputs** → predict next token at each step |
+| Concept | Where it appears in transformers |
+|---------|----------------------------------|
+| **Embedding** layer | Same — `nn.Embedding` is the first layer of GPT |
+| **Hidden state** | "Token representations" between layers |
+| **Per-step output** | Same — predict at every position |
+| **Cross-entropy loss** | Same — exactly |
+| **Autoregressive generation** | Same — sample one token at a time |
+| **Temperature** | Same — knob in every LLM API |
 
----
-
-## 8. Vocabulary You'll See
-
-Some terms that come up around sequence models:
-
-- **Time step / sequence step** — one position in the sequence
-- **Hidden state / hidden** — the "memory" vector
-- **Cell state** — extra memory in LSTMs (not in basic RNNs)
-- **Unroll** — visualize the recurrence as a linear chain of operations
-- **Teacher forcing** — during training, feed the TRUE previous token instead of the predicted one
-- **Many-to-one** — RNN output is single prediction (classification)
-- **Many-to-many** — RNN output is sequence (translation, generation)
+The only thing we throw away is the RECURRENCE (the step-by-step loop). Attention replaces it with "look at all past positions at once."
 
 ---
 
-## 9. Why We Still Learn RNNs
-
-If transformers are better, why bother with RNNs?
-
-1. **History** — transformers were a reaction to RNN limitations. Understanding RNNs makes transformers click.
-2. **Sequence concepts** — "hidden state," "step-by-step," "teacher forcing" → all introduced by RNNs.
-3. **Still used** — time series forecasting, edge devices, simpler problems.
-4. **Foundation for LSTM/GRU** — which ARE still widely used.
-
-RNN is the rite of passage before attention.
-
----
-
-## Mental Model
-
-Think of an RNN as a **note-taker reading a book**:
+## TL;DR
 
 ```
-Reads "The"        →  writes a note about "The"
-Reads "cat"        →  updates note: "subject is 'the cat'"
-Reads "sat"        →  updates note: "the cat is sitting"
-Reads "on"         →  updates note: "the cat is sitting on..."
-Reads "the"        →  updates note: still expecting an object
-Reads "mat"        →  updates note: "the cat sits on the mat"
-END                →  gives you the final summary note
+RNN = a tiny brain with a small notebook.
+It reads ONE word/letter at a time.
+After each word, it updates the notebook.
+The notebook carries forward all the context.
+
+Strengths:  handles any sequence length, captures order
+Weaknesses: vanishing gradient → can't remember far-back stuff
+
+What it teaches us: the concepts of sequence modeling
+What replaces it:    transformers (Day 15+)
 ```
 
-That "note" is the hidden state. It's a fixed-size vector that has to capture EVERYTHING relevant from the sentence.
-
-The fundamental weakness: it's just ONE note, no matter how long the book. Too much info → forgetting.
-
----
-
-## Summary
-
-| Concept | What It Does |
-|---------|-------------|
-| **RNN** | Reads sequence one step at a time |
-| **Hidden state** | Fixed-size "memory" updated at each step |
-| **`nn.RNN`** | PyTorch's basic RNN — `h_t = tanh(Wx + Uh + b)` |
-| **Final hidden** | The summary of the whole sequence |
-| **Vanishing gradient** | Long sequences lose signal during backprop |
-| **LSTM/GRU** | Improved RNNs with "gates" to manage memory |
-| **Transformer** | What replaced RNNs (we'll get to it in Day 19+) |
-
-### Today's evolution:
-
-```
-Day 10-11:  Mean of embeddings → ignore order  (BoW thinking)
-Day 13:     RNN with hidden state              ← YOU ARE HERE
-Day 14:     Bigram language model (RNN's simpler cousin)
-Day 15-18:  Attention — the key idea that beats RNNs
-Day 19+:    Transformer — attention done at scale
-```
-
-**Tomorrow:** Day 14 — bigram language models, the simplest "predict the next word" task. This is the foundation of GPT.
+You won't build GPT with RNNs. But every concept you learned today (hidden state as memory, predict-next-token, autoregressive generation, temperature sampling) carries forward.
